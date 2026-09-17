@@ -8,16 +8,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-binary_matrix = np.zeros((50,50))
 frames=[]
+energy=[]
+density={}
+visits={}
 
-def show_matrix(m):
-    print(m)
 
-
-def update_matrix(m,T=1,max_val=1):
+def update_matrix(m,T=1,max_val=1, E=0, setting='metropolis', epsilon=0.05):
     #global frames
     row_len, col_len = m.shape
+
+    def index(m):
+        idx = np.array(range(row_len * col_len))
+        rows, cols = np.unravel_index(idx, (row_len, col_len))
+        index = zip(rows,cols)
+        return index
+
 
     def shuffled_index(m):
         idx = np.random.permutation(row_len * col_len)
@@ -25,9 +31,25 @@ def update_matrix(m,T=1,max_val=1):
         index = zip(rows,cols)
         return index
 
+
     def get_proposed_value(current_value, max_val=1,distribution='anything_else'):
         choices = [x for x in range(max_val + 1) if x != current_value]
         return np.random.choice(choices)
+
+    def get_original_energy(original_value, neighbour_values):
+        original_energy=0
+        for i in neighbour_values:
+            if original_value == i: original_energy = original_energy + 1
+        return original_energy
+
+    def get_energy(original_value, proposed_value, neighbour_values,T=1):
+        original_energy=0
+        proposed_energy=0
+        for i in neighbour_values:
+            if original_value == i: original_energy = original_energy + 1
+            if proposed_value == i: proposed_energy = proposed_energy + 1
+        delta = original_energy - proposed_energy
+        return original_energy, proposed_energy, delta
 
     def get_probability(original_value, proposed_value, neighbour_values,T=1):
         original_energy=0
@@ -41,6 +63,33 @@ def update_matrix(m,T=1,max_val=1):
         #print(original_value, proposed_value, neighbour_values, delta, p)
         return p
 
+    def get_density(E):
+        global density
+        if E in density: return density[E]
+        return 0
+
+    def update_density(E, f):
+        global density
+        if E in density: density[E] += np.log(f)
+        else: density[E]=np.log(f)
+
+    def get_visits(E,visits):
+        if E in visits: return visits[E]
+        return 0
+
+    def update_visits(E, visits):
+        if E in visits: visits[E] += 1
+        else: visits[E]=1
+
+    def get_wang_probability(original_value, proposed_value, neighbour_values,E, T=1):
+        original_energy, proposed_energy, delta = get_energy(original_value, proposed_value, neighbour_values,T)
+        density_original = get_density(E)
+        proposed_total_energy = E - 2 * delta
+        density_proposed = get_density(proposed_total_energy)
+        if density_proposed == 0: return 2, proposed_total_energy
+        return density_original/density_proposed, proposed_total_energy
+
+
     def get_neighbours(i,m):
         x=i[0]
         y=i[1]
@@ -50,40 +99,163 @@ def update_matrix(m,T=1,max_val=1):
         m[(x+1) % L0, y],
         m[x, (y-1) % L1],
         m[x, (y+1) % L1],
-    ]
+        ]
         return neighbours
 
-    temp_index = shuffled_index(m)
-    for i in temp_index:
-        original_value = m[i]
-        proposed_value = get_proposed_value(original_value, max_val)
-        neighbour_values = get_neighbours(i,m)
-        probability = get_probability(original_value, proposed_value, neighbour_values, T)
+    def get_total_energy():
+        temp_index = index(m)
+        E=0
+        for i in temp_index:
+            original_value = m[i]
+            neighbour_values = get_neighbours(i,m)
+            original_e = get_original_energy(original_value,neighbour_values)
+            E += original_e
+        return E
 
-        if probability > 1:
-            m[i] = proposed_value
-            continue
+    def visit_density_is_flat(visits):
+        list_visits = np.array(list(visits.values()), dtype=float)
+        mean = list_visits.mean()
+        stdev = list_visits.std()
+        sum_visits = list_visits.sum()
+        bumpiness = stdev/mean
+        print("flatness;", bumpiness, " visits:", sum_visits)
+        if bumpiness < 0.5: return True
+        return False
 
-        decision = (probability>=np.random.rand())
-        if decision:
-            m[i] = proposed_value
-    frames.append(m.copy())
-    return m
+
+    def metropolis(E):
+        if E==0: E = get_total_energy()
+        energy.append(E)
+
+        temp_index = shuffled_index(m)
+        for i in temp_index:
+            original_value = m[i]
+            proposed_value = get_proposed_value(original_value, max_val)
+            neighbour_values = get_neighbours(i,m)
+            original_e, proposed_e, delta_e = get_energy(original_value, proposed_value, neighbour_values, T)
+            B=1/T
+            probability = np.exp(-B*delta_e)
+
+            if probability > 1:
+                m[i] = proposed_value
+                E = E + delta_e
+                continue
+
+            decision = (probability>=np.random.rand())
+            if decision:
+                m[i] = proposed_value
+        frames.append(m.copy())
+        #energy.append(E)
+        return m
+
+    def wang_landau(epsilon=0.001):
+        global visits
+        f=np.e
+        nr=0
+        while f > 1 + epsilon:
+            nr += 1
+            sub_nr=0
+            print("round", nr, " f=", f)
+            temp_index = shuffled_index(m)
+            E = get_total_energy()
+            for i in temp_index:
+                sub_nr += 1
+                if sub_nr %100 == 0: print(".", end='')
+                update_visits(E,visits)
+                update_density(E,f)
+
+                original_value = m[i]
+                proposed_value = get_proposed_value(original_value, max_val)
+                neighbour_values = get_neighbours(i,m)
+                probability, proposed_total_energy = get_wang_probability(original_value, proposed_value, neighbour_values, E, T)
+
+                if probability > 1:
+                    m[i] = proposed_value
+                    E = proposed_total_energy
+                    continue
+
+                decision = (probability>=np.random.rand())
+                if decision:
+                    m[i] = proposed_value
+                    E = proposed_total_energy
+
+            frames.append(m.copy())
+            if visit_density_is_flat(visits):
+                f = f**0.5
+                visits.clear()
+        return density
+
+    if setting=='metropolis': return metropolis(E)
+    elif setting=='wang_landau':  return wang_landau(epsilon)
+    else: raise("unknown setting!")
+
+
+binary_matrix = np.zeros((50,50))
+deka_matrix = np.zeros((4,4))
 
 
 T=0.95
-for i in range(0,50):
-    update_matrix(binary_matrix, T,max_val=9)
 
+update_matrix(deka_matrix, T ,max_val=9, setting='wang_landau', epsilon=0.05)
+print(density)
 
-fig, ax = plt.subplots()
-im = ax.imshow(frames[0], vmin=0, vmax=frames[0].max(), animated=True)
-
-def update(frame_idx):
-    im.set_array(frames[frame_idx])
-    ax.set_title(f"Sweep {frame_idx}")
-    return [im]
-
-ani = FuncAnimation(fig, update, frames=len(frames), interval=100, blit=True)
-ani.save("potts_evolution.gif", writer="pillow", fps=10)
+x=[]
+y=[]
+for key, value in density.items():
+    y.append(np.log(key))
+    x.append(np.log(value))
+plt.scatter(y,x)
 plt.show()
+
+x=[]
+y=[]
+for key, value in visits.items():
+    y.append(np.log(key))
+    x.append(np.log(value))
+plt.scatter(y,x)
+plt.show()
+
+# T=0.95
+# for i in range(0,100):
+#     update_matrix(binary_matrix, T,max_val=9)
+
+
+# fig, ax = plt.subplots()
+# im = ax.imshow(frames[0], vmin=0, vmax=frames[0].max(), animated=True)
+
+# def update(frame_idx):
+#     im.set_array(frames[frame_idx])
+#     ax.set_title(f"Sweep {frame_idx}")
+#     return [im]
+
+# ani = FuncAnimation(fig, update, frames=len(frames), interval=100, blit=True)
+# ani.save("potts_evolution_cold_start.gif", writer="pillow", fps=10)
+# plt.show()
+
+##############
+
+# hot_matrix = arr = np.random.randint(0, 10, size=(50,50))
+# frames=[]
+# energy1 = energy
+# energy = []
+
+# T=0.95
+# for i in range(0,100):
+#     update_matrix(hot_matrix, T, max_val=9)
+
+# fig, ax = plt.subplots()
+# im = ax.imshow(frames[0], vmin=0, vmax=frames[0].max(), animated=True)
+
+# def update(frame_idx):
+#     im.set_array(frames[frame_idx])
+#     ax.set_title(f"Sweep {frame_idx}")
+#     return [im]
+
+# ani = FuncAnimation(fig, update, frames=len(frames), interval=100, blit=True)
+# ani.save("potts_evolution_hot_start.gif", writer="pillow", fps=10)
+# plt.show()
+
+
+# plt.plot(energy1)
+# plt.plot(energy)
+# plt.show()
